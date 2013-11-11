@@ -1,0 +1,435 @@
+Option Explicit
+'Script written by <insert name>
+'Script copyrighted by <insert company name>
+'Script version Wednesday, June 19, 2013 4:15:50 PM
+Dim mesh
+Dim ifaces, ofaces
+Dim th
+Dim fs
+Dim vs
+Dim ns
+Dim cs
+Dim fns
+Dim armature
+Dim edg_crvs
+Dim tris
+Dim conns
+Dim gwidth
+
+Call Main()
+Sub Main()
+	Dim i,j,k
+	th = Rhino.GetReal("material thickness?", 0.125, 0.01)
+	gwidth = Rhino.GetReal("edge thickness thickness?", 0.5, 0.01)
+	mesh = Rhino.ObjectsByLayer("mesh")(0)
+	Rhino.EnableRedraw False
+	vs = Rhino.MeshVertices(mesh)
+	fs = Rhino.MeshFaceVertices(mesh)
+	cs = Rhino.MeshFaceCenters(mesh)
+	ns = Rhino.MeshVertexNormals(mesh)
+	fns = Rhino.MeshFaceNormals(mesh)
+	armature = Rhino.ObjectsByLayer("armature")(0)
+	
+	Rhino.AddLayer "construction", RGB(50, 255, 0)
+	Rhino.CurrentLayer "construction"
+	
+	ReDim ifaces(ubound(fs)), ofaces(ubound(fs)), tris(ubound(fs))
+	ReDim conns(-1)
+	Dim f, vf, nf, c
+	For i = 0 To ubound(fs)
+		
+		f = fs(i)
+		c = cs(i)
+		
+		ReDim vf(2), nf(2)
+		For j=0 To 2
+			vf(j) = vs(f(j))
+			nf(j) = ns(f(j))
+		Next
+		genInOut vf, nf, c, i, fns(i)
+	Next
+	
+	Dim cifaces, cofaces
+	cifaces = Rhino.CopyObjects(ifaces)
+	cofaces = Rhino.CopyObjects(ofaces)
+	
+	For i=0 To ubound(ifaces)
+		splitTris ofaces(i), cofaces, i
+		splitTris ifaces(i), cifaces, i
+	Next
+	
+	Rhino.DeleteObjects cifaces
+	Rhino.DeleteObjects cofaces
+	For i = 0 To ubound(fs)
+			
+		f = fs(i)
+		c = cs(i)
+			
+		ReDim vf(2), nf(2)
+		For j=0 To 2
+			vf(j) = vs(f(j))
+			nf(j) = ns(f(j))
+		Next
+			
+		tris(i) = makeTri(vf, nf, c, i, fns(i))
+	Next
+	
+	edg_crvs = Rhino.ObjectsByLayer("edges")
+	Dim edg
+	Rhino.AddLayer("connectors")
+	Rhino.CurrentLayer("connectors")
+	For Each edg In edg_crvs
+		makeEdge edg
+	Next
+	
+	Dim tri
+	
+	For i=0 To ubound(tris)
+		tri = tris(i)(0)
+		Dim intersects
+		intersects = Rhino.IntersectBreps(tri, armature, 0.001, True)
+		If intersects Then
+			Dim subtractedtri
+			subtractedtri = Rhino.BooleanDifference(Array(tri), Array(armature), False)
+			Rhino.DeleteObject tri
+			tris(i)(0) = subtractedtri(0)
+		End If
+	Next
+	
+	Rhino.DeleteObjects ifaces
+	Rhino.DeleteObjects ofaces
+	
+	Dim conn
+	Dim at : at = Array(0, 100, 0)
+	For Each conn In conns
+		laydownConn conn(0), conn(1), at
+		at(1) = at(1) + 3
+	Next
+	
+	at = Array(20, 100, 0)
+	For i=0 To ubound(tris)
+		laydownTri tris(i), cs(i), fns(i), at
+		at(1) = at(1) + 20
+	Next
+	Rhino.EnableRedraw True
+End Sub
+
+Sub laydownConn(ByRef conn, ByRef pl, ByRef pt)
+	Dim ptpl
+	ptpl = Array(pt, Array(1, 0, 0), Array(0, 1, 0), Array(0, 0, 1))
+	Dim xform
+	xform = Rhino.XformRotation(pl, ptpl)
+	Dim tconn : tconn = Rhino.TransformObject(conn, xform, True)
+	Dim llayer : llayer = Rhino.ObjectLayer(tconn) & "::laydown"
+	Dim col : col = Rhino.LayerColor(Rhino.ObjectLayer(tconn))
+	Rhino.AddLayer llayer, col * 0.8
+	Rhino.CurrentLayer llayer
+	Dim rawname : rawname = strip(Rhino.ObjectLayer(tconn))
+	Dim toks : toks = Rhino.Strtok(rawname, "_")
+	Dim name : name = toks(0) & "_" & toks(1) & "_" & toks(2)
+	
+	Dim cen, bbox
+	bbox = Rhino.BoundingBox(tconn)
+	cen = Rhino.VectorScale(Rhino.VectorAdd(bbox(0), bbox(2)), 0.5)
+	
+	intersectAndDelete tconn
+	
+	addText cen, name
+	
+End Sub
+
+Sub laydownTri(ByRef tri, ByRef cen, ByRef fn, ByRef pt)
+	Dim ptpl
+	ptpl = Array(pt, Array(1, 0, 0), Array(0, 1, 0), Array(0, 0, 1))
+	Dim pl
+	pl = Rhino.PlaneFromNormal(cen, fn)
+	Dim xform
+	xform = Rhino.XformRotation(pl, ptpl)
+	Dim ttri : ttri = Rhino.TransformObjects(tri, xform, True)
+	
+	Dim llayer : llayer = Rhino.ObjectLayer(tri(0)) & "::laydown"
+	Dim col : col = Rhino.LayerColor(Rhino.ObjectLayer(tri(0)))
+	Rhino.AddLayer llayer, col * 0.8
+	Rhino.CurrentLayer llayer
+	
+	Dim name : name = strip(Rhino.ObjectLayer(ttri(0)))
+	
+	intersectAndDelete ttri(0)
+	
+	Dim tcen, tpts
+	tpts = Rhino.CurvePoints(ttri(1))
+	tcen = Rhino.CurveAreaCentroid(ttri(1))(0)
+	Dim tpt : tpt = Rhino.VectorAdd(tpts(0), Rhino.VectorScale(Rhino.VectorSubtract(tcen, tpts(0)), 0.08))
+	addText tpt, name
+	Rhino.DeleteObject ttri(1)
+	
+End Sub
+
+Sub intersectAndDelete(ByRef obj)
+	Dim bbox : bbox = Rhino.BoundingBox(obj)
+	Dim mid : mid = Rhino.VectorScale(Rhino.VectorAdd(bbox(0), bbox(4)), 0.5)
+	Dim pln : pln = Rhino.PlaneFromPoints(bbox(0), bbox(1), bbox(3))
+	pln(0) = mid
+	
+	Rhino.AddSrfContourCrvs obj, pln
+	
+	Rhino.DeleteObject obj
+End Sub
+
+Sub addText(ByRef cen, ByRef raw)
+	Dim i,j,k
+	Rhino.AddLayer "text", RGB(255, 255, 255)
+	Rhino.CurrentLayer "text"
+	Dim toks : toks = Rhino.Strtok(raw, "_")
+	Dim txt : txt = ""
+	For i=1 To ubound(toks)
+		txt = txt + toks(i) + " "
+	Next
+	
+	Rhino.Command "-_TextObject O C " + chr(34) + txt + chr(34) + " " + Rhino.Pt2Str(cen) + " _Enter"
+	Dim text : text = Rhino.LastCreatedObjects()
+	Dim bbox : bbox = Rhino.BoundingBox(text)
+	Dim tcen : tcen = Rhino.VectorScale(Rhino.VectorAdd(bbox(0), bbox(2)), 0.5)
+	Rhino.MoveObjects text, tcen, cen
+End Sub
+
+Sub makeEdge(ByRef edg)
+	Dim i,j,k
+	Dim pts
+	pts = Rhino.DivideCurve(edg, 3, False)
+	
+	For i=1 To ubound(pts) - 1
+		makeConnector pts(i), edg, i
+	Next
+End Sub
+
+Sub makeConnector(ByRef cen, ByRef crv, ByRef ind)
+	Dim i,j,k
+	Dim pl, plos
+	pl = Rhino.PlaneFromNormal(cen, Rhino.VectorSubtract(Rhino.CurveEndPoint(crv), Rhino.CurveStartPoint(crv)))
+	
+	plos = pl
+	
+	plos(0) = Rhino.VectorSubtract(cen, Rhino.VectorScale(pl(3), th * 0.5))
+	
+	Dim innerpuck, outerpuck
+	innerpuck = Rhino.AddCylinder(plos, th, gwidth * 0.5)
+	outerpuck = Rhino.AddCylinder(plos, th, gwidth * 0.8)
+	
+	Dim name : name = "conn"
+	
+	For i=0 To ubound(tris)
+		Dim intersects
+		intersects = Rhino.IntersectBreps(tris(i)(0), innerpuck, 0.001, True)
+		
+		If intersects Then
+			Dim subtractedtri
+			subtractedtri = Rhino.BooleanDifference(Array(tris(i)(0)), innerpuck, False)
+			Rhino.DeleteObject tris(i)(0)
+			tris(i)(0) = subtractedtri(0)
+			
+			Dim subtractedpuck
+			subtractedpuck = Rhino.BooleanDifference(Array(outerpuck), tris(i)(0), False)
+			Rhino.DeleteObject outerpuck
+			outerpuck = subtractedpuck(0)
+			
+			name = name + "_" + cstr(i)
+		End If
+	Next
+	
+	name = name + "_" + cstr(ind)
+	
+	Rhino.DeleteObject innerpuck
+	Rhino.AddLayer "conns"
+	Rhino.AddLayer "conns::" & name, RGB(Rnd * 255, Rnd * 255, Rnd * 255)
+	Rhino.ObjectLayer outerpuck, "conns::" & name
+	
+	ReDim Preserve conns(ubound(conns)+1)
+	conns(ubound(conns)) = Array(outerpuck, pl)
+End Sub
+
+Sub genInOut(ByRef v, ByRef n, ByRef c, ByRef tind, ByRef fn)
+	Dim i,j,k
+	Dim pl, pli, plo
+	pl = Rhino.PlaneFromNormal(c, fn)
+	Dim ptsin, ptsout
+	ReDim ptsin(2), ptsout(2)
+	
+	For i= 0 To 2
+		ptsin(i) = Rhino.VectorAdd(v(i), Rhino.VectorReverse(Rhino.VectorScale(pl(3), th * 0.5)))
+		ptsout(i) = Rhino.VectorAdd(v(i), Rhino.VectorScale(pl(3), th * 0.5))
+	Next
+	
+	ifaces(tind) = Rhino.AddSrfPt(ptsin)
+	ofaces(tind) = Rhino.AddSrfPt(ptsout)
+End Sub
+
+Sub splitTris(ByRef tri, ByRef ints, ByRef ind)
+	Dim i,j,k
+	Dim intobjs
+	ReDim intobjs(-1)
+	For i=0 To ubound(ints)
+		Rhino.UnselectAllObjects
+		Rhino.SelectObjects Array(ints(i), tri)
+		Rhino.Command "-_Intersect "
+		Dim possint
+		possint = Rhino.LastCreatedObjects()
+		If isNull(possint) = False Then
+			If Rhino.IsCurve(possint(0)) Then
+				intobjs = Rhino.JoinArrays(intobjs, possint)
+			Else
+				Rhino.DeleteObjects possint
+			End If
+		End If
+	Next
+	If ubound(intobjs) > -1 Then
+		Rhino.UnselectAllObjects
+		Rhino.SelectObject tri
+		
+		For i=0 To ubound(intobjs)
+			If Rhino.IsCurve(intobjs(i)) Then
+				intobjs(i) = Rhino.ScaleObject(intobjs(i), Rhino.CurveMidPoint(intobjs(i)), Array(1.2, 1.2, 1.2))
+			End If
+		Next
+		
+		Dim splitcommand
+		splitcommand = "-_Split"
+		For i=0 To ubound(intobjs)
+			splitcommand = splitcommand + " _selid " + intobjs(i)
+		Next
+		splitcommand = splitcommand + " _Enter"
+		Rhino.Command splitcommand
+		Dim bits
+		bits = Rhino.LastCreatedObjects()
+		If isNull(bits) = False Then
+			Dim maxarea, bind
+			bind = -1
+			maxarea = 0
+			For j=0 To ubound(bits)
+				Dim area
+				area = Rhino.SurfaceArea(bits(j))(0)
+				If area > maxarea Then
+					maxarea = area
+					bind = j
+				End If
+			Next
+		
+			For j=0 To ubound(bits)
+				If j = bind Then
+					tri = bits(j)
+				Else
+					Rhino.DeleteObject bits(j)
+				End If
+			Next
+		End If
+		Rhino.DeleteObjects intobjs
+	End If
+End Sub
+
+Function makeTri(ByRef v, ByRef n, ByRef c, ByRef tind, ByRef fn)
+	Rhino.AddLayer "tris"
+	Rhino.AddLayer "tris::tri_" + cstr(tind), RGB(Rnd * 255, Rnd * 255, Rnd * 255)
+	Rhino.CurrentLayer "tris::tri_" + cstr(tind)
+	Dim i,j,k
+	Dim vo, vi
+	ReDim vo(2), vi(2)
+	Dim pl, pli, plo
+	pl = Rhino.PlaneFromNormal(c, fn)
+	
+	Dim pts
+	ReDim pts(3)
+	
+	plo = pl
+	plo(0) = Rhino.VectorAdd(pl(0), Rhino.VectorScale(pl(3), th * 0.5))
+	pli = pl
+	pli(0) = Rhino.VectorAdd(pl(0), Rhino.VectorReverse(Rhino.VectorScale(pl(3), th * 0.5)))
+	
+	For i=0 To ubound(v)
+		Dim eni, eno
+		eno = Rhino.VectorAdd(v(i), Rhino.VectorScale(n(i), th * 10.0))
+		eni = Rhino.VectorAdd(v(i), Rhino.VectorReverse(Rhino.VectorScale(n(i), th * 10.0)))
+		Dim op, ip
+		op = Rhino.DuplicateEdgeCurves(ofaces(tind))
+		vo(i) = closestEnd(v(i), op)
+		ip = Rhino.DuplicateEdgeCurves(ifaces(tind))
+		vi(i) = closestEnd(v(i), ip)
+	
+	Next
+	
+	For i=0 To ubound(v)
+		pts(i) = getInner(Array(vo(i), v(i), vi(i)), pl, c)
+	Next
+	
+	pts(3) = pts(0)
+	
+	Dim operim, iperim
+	Dim w
+	w = gwidth
+	operim = Rhino.AddPolyline(pts)
+	iperim = Rhino.OffsetCurve(operim, c, w)(0)
+	
+	Dim ftri : ftri = Rhino.AddPlanarSrf(Array(operim, iperim))(0)
+	ftri = Rhino.MoveObject(ftri, pl(0), pli(0))
+	Dim excrv : excrv = Rhino.AddLine(pli(0), plo(0))
+	Dim tri : tri = Rhino.ExtrudeSurface(ftri, excrv, True)
+	Rhino.DeleteObjects Array(ftri, excrv)
+	makeTri = Array(tri, operim)
+End Function
+
+Sub addPlane(ByRef pl)
+	Dim pts
+	ReDim pts(3)
+	pts(0) = Rhino.EvaluatePlane(pl, Array(-10, -10))
+	pts(1) = Rhino.EvaluatePlane(pl, Array(10, -10))
+	pts(2) = Rhino.EvaluatePlane(pl, Array(10, 10))
+	pts(3) = Rhino.EvaluatePlane(pl, Array(-10, 10))
+	Rhino.AddSrfPt pts
+End Sub
+
+Function closestEnd(pt, crvs)
+	Dim i
+	Dim pts
+	ReDim pts(-1)
+	For i=0 To ubound(crvs)
+		pts = Rhino.JoinArrays(pts, Rhino.CurvePoints(crvs(i)))
+	Next
+	
+	closestEnd = pts(Rhino.PointArrayClosestPoint(pts, pt))
+End Function
+
+Function getInner(ByVal v, ByRef pl, ByRef c)
+	Dim i,j,k
+	
+	Dim min, mind
+	min = -1
+	mind = -1
+	
+	For i=0 To ubound(v)
+		Rhino.Print("pt")
+		Rhino.Print(Rhino.Pt2Str(v(i)))
+		Dim pt
+		pt = Rhino.PlaneClosestPoint(pl, v(i), True)
+		
+		
+		If min < 0 Then
+			min = Rhino.Distance(pt, c)
+			mind = i
+		Else
+			Rhino.Print("cen")
+			Rhino.Print(Rhino.Pt2Str(c))
+			If Rhino.Distance(pt, c) < min Then
+				min = Rhino.Distance(pt, c)
+				mind = i
+			End If
+		End If
+		
+		v(i) = pt
+	Next
+	
+	getInner = v(mind)
+End Function
+
+Function strip(ByRef l)
+	Dim toks : toks = Rhino.Strtok(l, "::")
+	strip = toks(ubound(toks))
+End Function
